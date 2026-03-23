@@ -1,0 +1,27 @@
+# Data (train on remote server)
+data/*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# uv
+.uv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Face database (runtime generated)
+*.db
+*.npy
+face_db/
