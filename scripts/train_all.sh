@@ -28,7 +28,7 @@ do
         --to notebook \
         --execute \
         --inplace \
-        --ExecutePreprocessor.timeout=7200 \
+        --ExecutePreprocessor.timeout=86400 \
         "$nb"
     echo ">>> Done: $nb"
 done
