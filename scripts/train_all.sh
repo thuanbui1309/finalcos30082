@@ -18,10 +18,22 @@ fi
 # --run or foreground: execute notebooks
 echo "=== Starting training pipeline (GPU $CUDA_VISIBLE_DEVICES) ==="
 
+declare -A NB_WEIGHTS=(
+    ["notebooks/02_face_classification.ipynb"]="weights/face_classification.pth"
+    ["notebooks/03_face_metric_learning.ipynb"]="weights/face_metric_learning.pth"
+)
+
 for nb in \
     "notebooks/02_face_classification.ipynb" \
     "notebooks/03_face_metric_learning.ipynb"
 do
+    weight="${NB_WEIGHTS[$nb]}"
+    if [[ -f "$weight" ]]; then
+        echo ""
+        echo ">>> Skipping $nb (weights already exist: $weight)"
+        continue
+    fi
+
     echo ""
     echo ">>> Running $nb ..."
     uv run --extra train jupyter nbconvert \
