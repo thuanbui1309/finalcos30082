@@ -2,6 +2,7 @@
 
 import numpy as np
 import cv2
+from deepface import DeepFace
 
 
 class EmotionRecognizer:
@@ -16,8 +17,7 @@ class EmotionRecognizer:
     _LABEL_MAP = {e: e for e in EMOTIONS}
 
     def __init__(self, weights_path: str = None, device: str = "cpu"):
-        from deepface import DeepFace
-        self._deepface = DeepFace
+        pass
 
     def recognize(self, face_image: np.ndarray) -> tuple[str, float]:
         """Recognize emotion from a cropped face image.
@@ -30,7 +30,7 @@ class EmotionRecognizer:
         """
         bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
         try:
-            results = self._deepface.analyze(
+            results = DeepFace.analyze(
                 bgr,
                 actions=["emotion"],
                 enforce_detection=False,
@@ -52,7 +52,7 @@ class EmotionRecognizer:
         """
         bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
         try:
-            results = self._deepface.analyze(
+            results = DeepFace.analyze(
                 bgr,
                 actions=["emotion"],
                 enforce_detection=False,

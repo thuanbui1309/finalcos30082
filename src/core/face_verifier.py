@@ -32,14 +32,14 @@ class FaceVerifier:
         # Build model
         if model_type == "classifier":
             self.model = FaceClassifier(
-                num_classes=num_classes, embedding_dim=512, backbone="resnet18"
+                num_classes=num_classes, embedding_dim=512, backbone="resnet50"
             )
         elif model_type == "arcface":
             self.model = ArcFaceClassifier(
-                num_classes=num_classes, embedding_dim=512, backbone="resnet18"
+                num_classes=num_classes, embedding_dim=512, backbone="resnet50"
             )
         elif model_type == "triplet":
-            self.model = FaceEmbedNet(embedding_dim=512, backbone="resnet18")
+            self.model = FaceEmbedNet(embedding_dim=512, backbone="resnet50")
         else:
             raise ValueError(
                 f"Unknown model_type '{model_type}'. "

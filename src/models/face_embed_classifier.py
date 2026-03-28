@@ -119,21 +119,21 @@ class FaceClassifier(nn.Module):
     ) -> None:
         super().__init__()
         self.backbone, feat_dim = _build_resnet_backbone(backbone)
-        self.embed_fc = nn.Linear(feat_dim, embedding_dim)
+        self.embed = nn.Linear(feat_dim, embedding_dim)
         self.bn = nn.BatchNorm1d(embedding_dim)
-        self.classifier = nn.Linear(embedding_dim, num_classes)
+        self.head = nn.Linear(embedding_dim, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return classification logits of shape ``(B, num_classes)``."""
         feat = self.backbone(x).flatten(1)
-        emb = self.bn(self.embed_fc(feat))
-        logits = self.classifier(emb)
+        emb = self.bn(self.embed(feat))
+        logits = self.head(emb)
         return logits
 
     def extract_embedding(self, x: torch.Tensor) -> torch.Tensor:
         """Return L2-normalised embedding of shape ``(B, embedding_dim)``."""
         feat = self.backbone(x).flatten(1)
-        emb = self.bn(self.embed_fc(feat))
+        emb = self.bn(self.embed(feat))
         emb = F.normalize(emb, p=2, dim=1)
         return emb
 
@@ -166,7 +166,7 @@ class ArcFaceClassifier(nn.Module):
     ) -> None:
         super().__init__()
         self.backbone, feat_dim = _build_resnet_backbone(backbone)
-        self.embed_fc = nn.Linear(feat_dim, embedding_dim)
+        self.embed = nn.Linear(feat_dim, embedding_dim)
         self.bn = nn.BatchNorm1d(embedding_dim)
         self.arcface_head = ArcFaceHead(embedding_dim, num_classes, s=s, m=m)
 
@@ -180,13 +180,13 @@ class ArcFaceClassifier(nn.Module):
             margin is only applied to the target class.
         """
         feat = self.backbone(x).flatten(1)
-        emb = self.bn(self.embed_fc(feat))
+        emb = self.bn(self.embed(feat))
         logits = self.arcface_head(emb, labels)
         return logits
 
     def extract_embedding(self, x: torch.Tensor) -> torch.Tensor:
         """Return L2-normalised embedding of shape ``(B, embedding_dim)``."""
         feat = self.backbone(x).flatten(1)
-        emb = self.bn(self.embed_fc(feat))
+        emb = self.bn(self.embed(feat))
         emb = F.normalize(emb, p=2, dim=1)
         return emb

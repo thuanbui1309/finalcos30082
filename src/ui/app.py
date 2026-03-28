@@ -16,6 +16,12 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
+from src.core.face_detector import FaceDetector
+from src.core.face_verifier import FaceVerifier
+from src.core.liveness_checker import LivenessChecker
+from src.core.emotion_recognizer import EmotionRecognizer
+from src.core.face_database import FaceDatabase
+
 st.set_page_config(
     page_title="Face Attendance System",
     layout="wide",
@@ -31,16 +37,14 @@ DATA_DIR = ROOT / "data" / "classification_data"
 
 @st.cache_resource
 def load_detector():
-    from src.core.face_detector import FaceDetector
     return FaceDetector(device="cpu")
 
 
 @st.cache_resource
 def load_verifier(model_type: str):
-    from src.core.face_verifier import FaceVerifier
     weight_map = {
         "classifier": WEIGHTS / "face_classification.pth",
-        "arcface":    WEIGHTS / "face_classification.pth",
+        "arcface":    WEIGHTS / "face_classification_arc.pth",
         "triplet":    WEIGHTS / "face_metric_learning.pth",
     }
     wp = weight_map[model_type]
@@ -52,19 +56,16 @@ def load_verifier(model_type: str):
 
 @st.cache_resource
 def load_liveness():
-    from src.core.liveness_checker import LivenessChecker
-    return LivenessChecker(device="cpu")
+    return LivenessChecker()
 
 
 @st.cache_resource
 def load_emotion():
-    from src.core.emotion_recognizer import EmotionRecognizer
     return EmotionRecognizer()
 
 
 @st.cache_resource
 def load_database():
-    from src.core.face_database import FaceDatabase
     return FaceDatabase(db_dir=str(DB_DIR))
 
 
@@ -105,10 +106,16 @@ def run_full_pipeline(img_bgr, verifier, liveness, emotion_rec, database,
     bbox     = info["bbox"]
     annotated = img_bgr.copy()
 
-    # Liveness
-    is_real, live_conf = liveness.check(face_rgb)
-    live_color = (0, 200, 0) if is_real else (0, 0, 220)
-    live_label = "Real" if is_real else "Fake"
+    # Convert original image to RGB for DeepFace modules
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # Liveness (use full image — DeepFace detects face internally)
+    if liveness is not None:
+        is_real, live_conf = liveness.check(img_rgb)
+    else:
+        is_real, live_conf = None, None
+    live_color = (0, 200, 0) if is_real else (180, 180, 180)
+    live_label = ("Real" if is_real else "Fake") if is_real is not None else "Face"
     annotated  = draw_face_box(annotated, bbox, live_label, live_color)
 
     # Top-k identity
@@ -117,11 +124,11 @@ def run_full_pipeline(img_bgr, verifier, liveness, emotion_rec, database,
         emb         = verifier.extract_embedding(face_rgb)
         top_matches = database.search(emb, metric=metric, threshold=0.0)[:top_k]
 
-    # Emotion — all scores
+    # Emotion (use full image — DeepFace detects face internally)
     emotion_scores   = {}
     dominant_emotion = "N/A"
     if emotion_rec is not None:
-        emotion_scores   = emotion_rec.recognize_all(face_rgb)
+        emotion_scores   = emotion_rec.recognize_all(img_rgb)
         dominant_emotion = max(emotion_scores, key=emotion_scores.get) if emotion_scores else "N/A"
 
     return dict(
@@ -144,10 +151,13 @@ def show_results(res: dict, verify_threshold: float):
 
     # --- Liveness ---
     st.subheader("Liveness")
-    col_l1, col_l2 = st.columns([1, 3])
-    status = "Real" if res["is_real"] else "Fake"
-    col_l1.metric("Status", status)
-    col_l2.progress(res["live_conf"], text=f"Confidence: {res['live_conf']:.1%}")
+    if res["is_real"] is None:
+        st.info("Liveness model not available (coming soon).")
+    else:
+        col_l1, col_l2 = st.columns([1, 3])
+        status = "Real" if res["is_real"] else "Fake"
+        col_l1.metric("Status", status)
+        col_l2.progress(res["live_conf"], text=f"Confidence: {res['live_conf']:.1%}")
 
     st.divider()
 
@@ -199,15 +209,16 @@ with st.sidebar.expander("Model Settings", expanded=False):
 
 mode = st.sidebar.radio(
     "Mode",
-    ["Attendance (Verify)", "Demo (Dataset Image)", "Register New Face", "View Database"],
+    ["Attendance (Verify)", "Register New Face", "View Database"],
 )
 
 if "attendance_log" not in st.session_state:
     st.session_state.attendance_log = []
 
 # Pre-load always-on models
-liveness    = load_liveness()
-emotion_rec = load_emotion()
+# TODO: re-enable once liveness/emotion accuracy is improved
+liveness    = None
+emotion_rec = None
 database    = load_database()
 
 # ---------------------------------------------------------------------------
@@ -217,97 +228,88 @@ if mode == "Attendance (Verify)":
     st.title("Attendance — Face Verification")
 
     verifier = load_verifier(model_type)
-    col_cam, col_res = st.columns([1, 1])
 
-    with col_cam:
+    tab_cam, tab_upload, tab_log = st.tabs(["Camera", "Upload Image", "Attendance Log"])
+
+    img_bgr = None
+
+    with tab_cam:
         captured = st.camera_input("Capture your face")
-
-    with col_res:
         if captured is not None:
             img_bgr = uploaded_to_bgr(captured)
-            res     = run_full_pipeline(img_bgr, verifier, liveness, emotion_rec,
-                                        database, metric, verify_threshold, top_k)
-            if res is None:
-                st.error("No face detected. Please try again.")
-            else:
-                show_results(res, verify_threshold)
 
+    with tab_upload:
+        uploaded = st.file_uploader("Upload a face image", type=["jpg", "jpeg", "png"], key="attend_upload")
+        if uploaded is not None:
+            img_bgr = uploaded_to_bgr(uploaded)
+
+    with tab_log:
+        if st.session_state.attendance_log:
+            st.dataframe(
+                pd.DataFrame(st.session_state.attendance_log),
+                use_container_width=True,
+            )
+            if st.button("Clear log"):
+                st.session_state.attendance_log = []
+                st.rerun()
+        else:
+            st.info("No attendance records yet.")
+
+    # --- Results panel (shown below tabs when an image is provided) ---
+    if img_bgr is not None:
+        res = run_full_pipeline(img_bgr, verifier, liveness, emotion_rec,
+                                database, metric, verify_threshold, top_k)
+        if res is None:
+            st.error("No face detected. Please try again.")
+        else:
+            st.divider()
+            col_img, col_info = st.columns([1, 1])
+
+            # --- Left column: annotated image ---
+            with col_img:
+                st.image(to_rgb(res["annotated_bgr"]),
+                         caption="Detected Face", use_container_width=True)
+
+            # --- Right column: detailed metrics ---
+            with col_info:
+                # Identity result
                 best_name = "Unknown"
                 best_score = 0.0
                 if res["top_matches"] and res["top_matches"][0]["score"] >= verify_threshold:
                     best_name  = res["top_matches"][0]["name"]
                     best_score = res["top_matches"][0]["score"]
 
-                st.session_state.attendance_log.insert(0, {
-                    "Time":     datetime.datetime.now().strftime("%H:%M:%S"),
-                    "Identity": best_name,
-                    "Score":    f"{best_score:.4f}",
-                    "Emotion":  res["dominant_emotion"],
-                    "Liveness": "Real" if res["is_real"] else "Fake",
-                })
-
-    if st.session_state.attendance_log:
-        st.subheader("Attendance Log")
-        st.dataframe(pd.DataFrame(st.session_state.attendance_log),
-                     use_container_width=True)
-        if st.button("Clear log"):
-            st.session_state.attendance_log = []
-            st.rerun()
-
-# ---------------------------------------------------------------------------
-# Mode: Demo
-# ---------------------------------------------------------------------------
-elif mode == "Demo (Dataset Image)":
-    st.title("Demo — Dataset Image Analysis")
-    st.caption("Pick any image from the dataset to run face recognition, liveness, and emotion.")
-
-    verifier = load_verifier(model_type)
-
-    # Build image list from val_data (faster than train)
-    splits = []
-    for split in ["val_data", "train_data", "test_data"]:
-        d = DATA_DIR / split
-        if d.exists():
-            splits.append(split)
-
-    chosen_split = st.selectbox("Dataset split", splits)
-    split_dir    = DATA_DIR / chosen_split
-
-    # List identity folders
-    id_folders = sorted([d.name for d in split_dir.iterdir() if d.is_dir()])
-    if not id_folders:
-        st.warning("No identity folders found.")
-        st.stop()
-
-    col_sel1, col_sel2 = st.columns(2)
-    with col_sel1:
-        chosen_id = st.selectbox("Identity folder", id_folders)
-    with col_sel2:
-        id_dir    = split_dir / chosen_id
-        img_files = sorted([f.name for f in id_dir.glob("*.jpg")])
-        chosen_img = st.selectbox("Image", img_files)
-
-    img_path = id_dir / chosen_img
-
-    col_img, col_res = st.columns([1, 1])
-
-    with col_img:
-        st.image(str(img_path), caption=f"{chosen_id} / {chosen_img}",
-                 use_container_width=True)
-
-    with col_res:
-        if st.button("Run Analysis", type="primary"):
-            img_bgr = cv2.imread(str(img_path))
-            if img_bgr is None:
-                st.error("Failed to load image.")
-            else:
-                with st.spinner("Running pipeline..."):
-                    res = run_full_pipeline(img_bgr, verifier, liveness, emotion_rec,
-                                            database, metric, verify_threshold, top_k)
-                if res is None:
-                    st.error("No face detected in this image.")
+                if best_name != "Unknown":
+                    st.success(f"**Identified: {best_name}**")
                 else:
-                    show_results(res, verify_threshold)
+                    st.warning("**No match found in database**")
+
+                # Key metrics row
+                m1, m2 = st.columns(2)
+                m1.metric("Similarity", f"{best_score:.4f}")
+                m2.metric("Metric", metric.capitalize())
+
+                st.divider()
+
+                # Top-K matches
+                st.caption("TOP MATCHES")
+                matches = res["top_matches"]
+                if matches:
+                    df = pd.DataFrame(matches)[["name", "score"]].copy()
+                    df.columns = ["Name", "Score"]
+                    df["Score"] = df["Score"].round(4)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No faces registered in database.")
+
+            # Append to log
+            st.session_state.attendance_log.insert(0, {
+                "Time":     datetime.datetime.now().strftime("%H:%M:%S"),
+                "Identity": best_name,
+                "Score":    f"{best_score:.4f}",
+                "Model":    model_type,
+                "Metric":   metric,
+            })
 
 # ---------------------------------------------------------------------------
 # Mode: Register
@@ -316,34 +318,43 @@ elif mode == "Register New Face":
     st.title("Register New Face")
 
     verifier = load_verifier(model_type)
-    col_form, col_preview = st.columns([1, 1])
+    name = st.text_input("Full name", placeholder="e.g. Nguyen Van A")
 
-    with col_form:
-        name     = st.text_input("Full name", placeholder="e.g. Nguyen Van A")
+    tab_cam, tab_upload = st.tabs(["Camera", "Upload Image"])
+
+    img_bgr = None
+
+    with tab_cam:
         captured = st.camera_input("Capture face for registration")
+        if captured is not None:
+            img_bgr = uploaded_to_bgr(captured)
 
-    with col_preview:
-        if captured and name.strip():
-            detector = load_detector()
-            img_bgr  = uploaded_to_bgr(captured)
-            faces    = detector.detect_and_crop(img_bgr)
+    with tab_upload:
+        uploaded = st.file_uploader("Upload a face image", type=["jpg", "jpeg", "png"], key="reg_upload")
+        if uploaded is not None:
+            img_bgr = uploaded_to_bgr(uploaded)
+            st.image(Image.open(uploaded), caption="Uploaded image", use_container_width=True)
 
-            if not faces:
-                st.error("No face detected. Retake photo.")
-            elif verifier is None:
-                st.error("Verifier model not loaded. Place weights in final/weights/.")
-            else:
-                face_rgb, info = faces[0]
-                annotated = draw_face_box(img_bgr, info["bbox"], name)
-                st.image(to_rgb(annotated), caption="Detected face",
-                         use_container_width=True)
+    if img_bgr is not None and name.strip():
+        detector = load_detector()
+        faces = detector.detect_and_crop(img_bgr)
 
-                if st.button("Confirm Registration", type="primary"):
-                    emb     = verifier.extract_embedding(face_rgb)
-                    face_id = database.register(name.strip(), emb, face_rgb)
-                    st.success(f"Registered '{name}' (ID: {face_id[:8]}...)")
-        elif captured and not name.strip():
-            st.warning("Please enter a name before registering.")
+        if not faces:
+            st.error("No face detected. Try a different image.")
+        elif verifier is None:
+            st.error("Verifier model not loaded. Place weights in final/weights/.")
+        else:
+            face_rgb, info = faces[0]
+            annotated = draw_face_box(img_bgr, info["bbox"], name)
+            st.image(to_rgb(annotated), caption="Detected face",
+                     use_container_width=True)
+
+            if st.button("Confirm Registration", type="primary"):
+                emb     = verifier.extract_embedding(face_rgb)
+                face_id = database.register(name.strip(), emb, face_rgb)
+                st.success(f"Registered '{name}' (ID: {face_id[:8]}...)")
+    elif img_bgr is not None and not name.strip():
+        st.warning("Please enter a name before registering.")
 
 # ---------------------------------------------------------------------------
 # Mode: View Database
