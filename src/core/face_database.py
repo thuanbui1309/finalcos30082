@@ -1,5 +1,6 @@
 """Persistent face embedding database backed by JSON + .npy files."""
 
+import glob
 import json
 import os
 import uuid
@@ -10,6 +11,8 @@ import numpy as np
 
 from src.utils.metrics import cosine_similarity, euclidean_distance
 
+ALL_MODEL_TYPES = ("classifier", "arcface", "triplet")
+
 
 class FaceDatabase:
     """Store and query face embeddings on disk.
@@ -17,11 +20,13 @@ class FaceDatabase:
     Layout inside *db_dir*::
 
         db_dir/
-            metadata.json          # list of registered face records
+            metadata.json
             embeddings/
-                <face_id>.npy      # one file per registered face
+                <face_id>_classifier.npy
+                <face_id>_arcface.npy
+                <face_id>_triplet.npy
             thumbnails/
-                <face_id>.png      # optional face thumbnail
+                <face_id>.png
     """
 
     def __init__(self, db_dir: str = "face_db"):
@@ -33,7 +38,6 @@ class FaceDatabase:
         os.makedirs(self.emb_dir, exist_ok=True)
         os.makedirs(self.thumb_dir, exist_ok=True)
 
-        # Ensure metadata file exists
         if not os.path.isfile(self.meta_path):
             self._save_db([])
 
@@ -42,58 +46,62 @@ class FaceDatabase:
     # ------------------------------------------------------------------
 
     def register(
-        self, name: str, embedding: np.ndarray, image: np.ndarray = None
+        self,
+        name: str,
+        embeddings: dict[str, np.ndarray],
+        image: np.ndarray = None,
     ) -> str:
-        """Register a new face embedding.
+        """Register a new face with embeddings from multiple models.
 
         Args:
             name: Person's name.
-            embedding: 1-D numpy embedding (e.g. 512-d).
-            image: Optional face thumbnail (RGB numpy array) to store.
+            embeddings: Mapping of model_type -> 1-D embedding array,
+                e.g. {"classifier": arr, "arcface": arr, "triplet": arr}.
+            image: Optional face thumbnail (RGB numpy array).
 
         Returns:
             Unique face_id string.
         """
         face_id = str(uuid.uuid4())
 
-        # Save embedding
-        np.save(os.path.join(self.emb_dir, f"{face_id}.npy"), embedding)
+        for model_type, emb in embeddings.items():
+            path = os.path.join(self.emb_dir, f"{face_id}_{model_type}.npy")
+            np.save(path, emb)
 
-        # Save optional thumbnail
         if image is not None:
             thumb_path = os.path.join(self.thumb_dir, f"{face_id}.png")
-            # Convert RGB to BGR for OpenCV
             bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             cv2.imwrite(thumb_path, bgr)
 
-        # Update metadata
         db = self._load_db()
         db.append(
             {
                 "face_id": face_id,
                 "name": name,
+                "models": list(embeddings.keys()),
                 "registered_at": datetime.now().isoformat(),
             }
         )
         self._save_db(db)
-
         return face_id
 
     def search(
         self,
         embedding: np.ndarray,
+        model_type: str = "classifier",
         metric: str = "cosine",
         threshold: float = 0.5,
     ) -> list:
-        """Search for matching faces above the similarity threshold.
+        """Search for matching faces using embeddings from a specific model.
 
         Args:
             embedding: Query embedding (1-D numpy array).
+            model_type: Which model's stored embedding to compare against.
             metric: 'cosine' or 'euclidean'.
             threshold: Minimum similarity score to include.
 
         Returns:
-            List of dicts sorted by score (descending):
+            List of dicts sorted by score descending:
             [{"face_id", "name", "score"}, ...]
         """
         db = self._load_db()
@@ -101,7 +109,7 @@ class FaceDatabase:
 
         for record in db:
             fid = record["face_id"]
-            emb_path = os.path.join(self.emb_dir, f"{fid}.npy")
+            emb_path = os.path.join(self.emb_dir, f"{fid}_{model_type}.npy")
             if not os.path.isfile(emb_path):
                 continue
 
@@ -119,39 +127,42 @@ class FaceDatabase:
     def identify(
         self,
         embedding: np.ndarray,
+        model_type: str = "classifier",
         metric: str = "cosine",
         threshold: float = 0.5,
     ) -> tuple:
         """Identify the best-matching person for the given embedding.
 
-        Args:
-            embedding: Query embedding.
-            metric: 'cosine' or 'euclidean'.
-            threshold: Minimum score for a valid match.
-
         Returns:
             (name, score) of the best match, or (None, 0.0) if none.
         """
-        matches = self.search(embedding, metric=metric, threshold=threshold)
+        matches = self.search(
+            embedding, model_type=model_type, metric=metric, threshold=threshold
+        )
         if matches:
             best = matches[0]
             return (best["name"], best["score"])
         return (None, 0.0)
 
     def list_all(self) -> list:
-        """Return all registered face records.
+        """Return all registered face records with available model info.
 
         Returns:
-            List of dicts [{"face_id", "name", "registered_at"}, ...].
+            List of dicts with keys: face_id, name, registered_at, models.
         """
-        return self._load_db()
+        db = self._load_db()
+        for record in db:
+            if "models" not in record:
+                available = []
+                for mt in ALL_MODEL_TYPES:
+                    p = os.path.join(self.emb_dir, f"{record['face_id']}_{mt}.npy")
+                    if os.path.isfile(p):
+                        available.append(mt)
+                record["models"] = available
+        return db
 
     def delete(self, face_id: str) -> bool:
-        """Delete a registered face by its ID.
-
-        Returns:
-            True if the face was found and deleted, False otherwise.
-        """
+        """Delete a registered face and all its embedding files."""
         db = self._load_db()
         new_db = [r for r in db if r["face_id"] != face_id]
 
@@ -160,12 +171,14 @@ class FaceDatabase:
 
         self._save_db(new_db)
 
-        # Remove embedding file
-        emb_path = os.path.join(self.emb_dir, f"{face_id}.npy")
-        if os.path.isfile(emb_path):
-            os.remove(emb_path)
+        for path in glob.glob(os.path.join(self.emb_dir, f"{face_id}_*.npy")):
+            os.remove(path)
 
-        # Remove thumbnail if present
+        # Legacy single-file cleanup
+        legacy_path = os.path.join(self.emb_dir, f"{face_id}.npy")
+        if os.path.isfile(legacy_path):
+            os.remove(legacy_path)
+
         thumb_path = os.path.join(self.thumb_dir, f"{face_id}.png")
         if os.path.isfile(thumb_path):
             os.remove(thumb_path)
@@ -177,7 +190,6 @@ class FaceDatabase:
     # ------------------------------------------------------------------
 
     def _load_db(self) -> list:
-        """Load the metadata JSON file."""
         try:
             with open(self.meta_path, "r") as f:
                 return json.load(f)
@@ -185,7 +197,6 @@ class FaceDatabase:
             return []
 
     def _save_db(self, db: list) -> None:
-        """Persist the metadata list to JSON."""
         with open(self.meta_path, "w") as f:
             json.dump(db, f, indent=2)
 
@@ -193,7 +204,6 @@ class FaceDatabase:
     def _compute_score(
         emb1: np.ndarray, emb2: np.ndarray, metric: str
     ) -> float:
-        """Compute a similarity score (higher = more similar)."""
         if metric == "cosine":
             return cosine_similarity(emb1, emb2)
         elif metric == "euclidean":

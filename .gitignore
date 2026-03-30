@@ -1,5 +1,6 @@
 # Data (train on remote server)
 data/*
+weights/*
 
 # Python
 __pycache__/

@@ -49,13 +49,13 @@ class FaceEmbedNet(nn.Module):
     ) -> None:
         super().__init__()
         self.backbone, feat_dim = _build_resnet_backbone(backbone)
-        self.embed_fc = nn.Linear(feat_dim, embedding_dim)
+        self.embed = nn.Linear(feat_dim, embedding_dim)
         self.bn = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return L2-normalised embedding of shape ``(B, embedding_dim)``."""
         feat = self.backbone(x).flatten(1)
-        emb = self.bn(self.embed_fc(feat))
+        emb = self.bn(self.embed(feat))
         emb = F.normalize(emb, p=2, dim=1)
         return emb
 

@@ -29,7 +29,6 @@ class FaceVerifier:
         self.model_type = model_type
         self.transform = get_inference_transform(img_size=112)
 
-        # Build model
         if model_type == "classifier":
             self.model = FaceClassifier(
                 num_classes=num_classes, embedding_dim=512, backbone="resnet50"
@@ -46,11 +45,18 @@ class FaceVerifier:
                 "Choose from 'classifier', 'arcface', or 'triplet'."
             )
 
-        # Load weights if provided
         if weights_path is not None:
             try:
                 state = torch.load(weights_path, map_location=self.device)
-                self.model.load_state_dict(state)
+                if model_type == "arcface":
+                    remapped = {}
+                    for k, v in state.items():
+                        if k.startswith("head."):
+                            remapped[k.replace("head.", "arcface_head.", 1)] = v
+                        else:
+                            remapped[k] = v
+                    state = remapped
+                self.model.load_state_dict(state, strict=False)
             except FileNotFoundError:
                 raise FileNotFoundError(
                     f"Weights file not found: {weights_path}"
