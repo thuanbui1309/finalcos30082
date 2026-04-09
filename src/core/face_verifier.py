@@ -5,17 +5,22 @@ import torch
 from PIL import Image
 
 from src.models import ArcFaceClassifier, FaceClassifier, FaceEmbedNet
+from src.models.edgeface_backbone import EDGEFACE_VARIANTS, load_edgeface
 from src.utils.metrics import cosine_similarity, euclidean_distance
-from src.utils.transforms import get_inference_transform
+from src.utils.transforms import get_edgeface_transform, get_inference_transform
 
 
 class FaceVerifier:
     """Extract face embeddings and compare them for verification.
 
-    Supports three model types:
-        - 'classifier'  -> FaceClassifier
-        - 'arcface'     -> ArcFaceClassifier
-        - 'triplet'     -> FaceEmbedNet
+    Supports the following model types:
+        - 'classifier'              -> FaceClassifier (ResNet50 + softmax head)
+        - 'arcface'                 -> ArcFaceClassifier (ResNet50 + ArcFace head)
+        - 'triplet'                 -> FaceEmbedNet (ResNet50 + triplet loss)
+        - 'edgeface_xs_gamma_06'    -> EdgeFace XS (1.77 M params, recommended)
+        - 'edgeface_s_gamma_05'     -> EdgeFace S  (3.65 M params)
+        - 'edgeface_xxs'            -> EdgeFace XXS (1.24 M params)
+        - 'edgeface_base'           -> EdgeFace Base (18.23 M params)
     """
 
     def __init__(
@@ -27,6 +32,16 @@ class FaceVerifier:
     ):
         self.device = torch.device(device)
         self.model_type = model_type
+
+        if model_type in EDGEFACE_VARIANTS:
+            self.transform = get_edgeface_transform(img_size=112)
+            self.model = load_edgeface(
+                name=model_type,
+                weights_path=weights_path,
+                device=str(self.device),
+            )
+            return
+
         self.transform = get_inference_transform(img_size=112)
 
         if model_type == "classifier":
@@ -42,7 +57,7 @@ class FaceVerifier:
         else:
             raise ValueError(
                 f"Unknown model_type '{model_type}'. "
-                "Choose from 'classifier', 'arcface', or 'triplet'."
+                f"Choose from 'classifier', 'arcface', 'triplet', or one of {EDGEFACE_VARIANTS}."
             )
 
         if weights_path is not None:
@@ -78,7 +93,7 @@ class FaceVerifier:
         pil_img = Image.fromarray(face_image)
         tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
 
-        if self.model_type == "triplet":
+        if self.model_type == "triplet" or self.model_type in EDGEFACE_VARIANTS:
             embedding = self.model(tensor)
         else:
             embedding = self.model.extract_embedding(tensor)

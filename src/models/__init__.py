@@ -2,6 +2,7 @@
 
 from .face_embed_classifier import ArcFaceClassifier, ArcFaceHead, FaceClassifier
 from .face_embed_triplet import FaceEmbedNet, TripletDataset
+from .edgeface_backbone import EDGEFACE_VARIANTS, TimmFRWrapperV2, get_edgeface_model, load_edgeface
 
 __all__ = [
     "ArcFaceClassifier",
@@ -9,4 +10,8 @@ __all__ = [
     "FaceClassifier",
     "FaceEmbedNet",
     "TripletDataset",
+    "EDGEFACE_VARIANTS",
+    "TimmFRWrapperV2",
+    "get_edgeface_model",
+    "load_edgeface",
 ]

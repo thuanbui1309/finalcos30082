@@ -6,6 +6,9 @@ from torchvision import transforms
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
+EDGEFACE_MEAN = [0.5, 0.5, 0.5]
+EDGEFACE_STD = [0.5, 0.5, 0.5]
+
 
 def get_train_transforms(img_size: int = 112) -> transforms.Compose:
     """Return augmentation pipeline for training.
@@ -47,4 +50,17 @@ def get_inference_transform(img_size: int = 112) -> transforms.Compose:
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+
+
+def get_edgeface_transform(img_size: int = 112) -> transforms.Compose:
+    """Return inference transform for EdgeFace models.
+
+    EdgeFace expects pixel values normalised to [-1, 1] via mean/std of 0.5,
+    rather than ImageNet statistics.
+    """
+    return transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=EDGEFACE_MEAN, std=EDGEFACE_STD),
     ])
