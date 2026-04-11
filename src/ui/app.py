@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import datetime
+import logging
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
+
+logging.basicConfig(level=logging.DEBUG)
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -108,7 +113,7 @@ def extract_all_embeddings(
     return embeddings
 
 def run_full_pipeline(img_bgr, verifier, model_type, liveness, emotion_rec,
-                      database, metric, verify_threshold, top_k=5):
+                      database, metric, verify_threshold, top_k=5, device="cpu"):
     detector = load_detector(device)
     faces = detector.detect_and_crop(img_bgr)
     if not faces:
@@ -137,7 +142,7 @@ def run_full_pipeline(img_bgr, verifier, model_type, liveness, emotion_rec,
     emotion_scores = {}
     dominant_emotion = "N/A"
     if emotion_rec is not None:
-        emotion_scores = emotion_rec.recognize_all(img_rgb)
+        emotion_scores = emotion_rec.recognize_all(face_rgb)
         dominant_emotion = (
             max(emotion_scores, key=emotion_scores.get) if emotion_scores else "N/A"
         )
@@ -226,8 +231,8 @@ mode = st.sidebar.radio(
 if "attendance_log" not in st.session_state:
     st.session_state.attendance_log = []
 
-liveness = None
-emotion_rec = None
+liveness = load_liveness()
+emotion_rec = load_emotion()
 database = load_database()
 
 # Mode: Attendance
@@ -267,7 +272,7 @@ if mode == "Attendance (Verify)":
     if img_bgr is not None:
         res = run_full_pipeline(
             img_bgr, verifier, model_type, liveness, emotion_rec,
-            database, metric, verify_threshold, top_k,
+            database, metric, verify_threshold, top_k, device,
         )
         if res is None:
             st.error("No face detected. Please try again.")
@@ -283,17 +288,31 @@ if mode == "Attendance (Verify)":
                 )
 
             with col_info:
+                # Liveness
+                st.caption("LIVENESS")
+                if res["is_real"] is None:
+                    st.info("Liveness model not available.")
+                elif res["is_real"]:
+                    st.success(f"Real person ({res['live_conf']:.1%} confidence)")
+                else:
+                    st.error(f"Spoof detected ({res['live_conf']:.1%} confidence)")
+
+                st.divider()
+
                 best_name = "Unknown"
                 best_score = 0.0
                 if (
                     res["top_matches"]
                     and res["top_matches"][0]["score"] >= verify_threshold
+                    and (res["is_real"] is None or res["is_real"])
                 ):
                     best_name = res["top_matches"][0]["name"]
                     best_score = res["top_matches"][0]["score"]
 
                 if best_name != "Unknown":
                     st.success(f"**Identified: {best_name}**")
+                elif res["is_real"] is False:
+                    st.error("**Blocked: spoof detected**")
                 else:
                     st.warning("**No match found in database**")
 
@@ -312,6 +331,21 @@ if mode == "Attendance (Verify)":
                     st.dataframe(df, use_container_width=True, hide_index=True)
                 else:
                     st.info("No faces registered in database.")
+
+                st.divider()
+
+                st.caption("EMOTION")
+                scores = res["emotion_scores"]
+                if scores:
+                    top_emo = max(scores, key=scores.get)
+                    st.metric("Dominant", top_emo.capitalize(), f"{scores[top_emo]:.1%}")
+                    emo_df = pd.DataFrame(
+                        sorted(scores.items(), key=lambda x: -x[1]),
+                        columns=["Emotion", "Confidence"],
+                    ).set_index("Emotion")
+                    st.bar_chart(emo_df)
+                else:
+                    st.info("Emotion model not available.")
 
             st.session_state.attendance_log.insert(0, {
                 "Time": datetime.datetime.now().strftime("%H:%M:%S"),
@@ -383,10 +417,51 @@ elif mode == "Live Recognition":
 
     verifier = load_verifier(model_type, device)
     detector = load_detector(device)
+    _liveness = load_liveness()
+    _emotion = load_emotion()
 
     class FaceRecognitionProcessor(VideoProcessorBase):
         def __init__(self):
             self._prev_time = time.time()
+            self._cache: dict = {}
+            self._lock = threading.Lock()
+            # Only keep the latest frame; discard if inference is still running
+            self._in_queue: queue.SimpleQueue = queue.SimpleQueue()
+            self._thread = threading.Thread(target=self._inference_loop, daemon=True)
+            self._thread.start()
+
+        def _inference_loop(self):
+            while True:
+                img_bgr = self._in_queue.get()
+                try:
+                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                    faces = detector.detect_and_crop(img_bgr)
+                    if faces:
+                        face_rgb, info = faces[0]
+                        bbox = info["bbox"]
+                        is_real, live_conf = _liveness.check(img_rgb)
+                        best_name = "Unknown"
+                        best_score = 0.0
+                        if verifier is not None:
+                            emb = verifier.extract_embedding(face_rgb)
+                            matches = database.search(
+                                emb, model_type=model_type, metric=metric, threshold=0.0
+                            )[:top_k]
+                            if matches and matches[0]["score"] >= verify_threshold:
+                                best_name = matches[0]["name"]
+                                best_score = matches[0]["score"]
+                        emotion_scores = _emotion.recognize_all(face_rgb)
+                        dominant = max(emotion_scores, key=emotion_scores.get) if emotion_scores else ""
+                        with self._lock:
+                            self._cache = dict(
+                                bbox=bbox, is_real=is_real, live_conf=live_conf,
+                                best_name=best_name, best_score=best_score, dominant=dominant,
+                            )
+                    else:
+                        with self._lock:
+                            self._cache = {}
+                except Exception:
+                    pass
 
         def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
             img_bgr = frame.to_ndarray(format="bgr24")
@@ -395,27 +470,31 @@ elif mode == "Live Recognition":
             fps = 1.0 / max(now - self._prev_time, 1e-6)
             self._prev_time = now
 
-            best_name = "Unknown"
-            best_score = 0.0
+            # Submit frame for inference only if inference thread is idle
+            if self._in_queue.empty():
+                self._in_queue.put(img_bgr)
+
+            # Return immediately with cached overlay — never blocks
             annotated = img_bgr.copy()
+            with self._lock:
+                c = dict(self._cache)
 
-            if verifier is not None:
-                faces = detector.detect_and_crop(img_bgr)
-                if faces:
-                    face_rgb, info = faces[0]
-                    bbox = info["bbox"]
-                    emb = verifier.extract_embedding(face_rgb)
-                    matches = database.search(
-                        emb, model_type=model_type, metric=metric, threshold=0.0
-                    )[:top_k]
-
-                    if matches and matches[0]["score"] >= verify_threshold:
-                        best_name = matches[0]["name"]
-                        best_score = matches[0]["score"]
-
-                    color = (0, 200, 0) if best_name != "Unknown" else (0, 0, 255)
-                    label = f"{best_name} ({best_score:.2f})"
-                    annotated = draw_face_box(annotated, bbox, label, color)
+            if c:
+                bbox = c["bbox"]
+                if not c["is_real"]:
+                    color = (0, 0, 255)
+                    label = f"SPOOF ({c['live_conf']:.0%})"
+                else:
+                    color = (0, 200, 0) if c["best_name"] != "Unknown" else (0, 165, 255)
+                    label = f"{c['best_name']} ({c['best_score']:.2f})"
+                annotated = draw_face_box(annotated, bbox, label, color)
+                if c["dominant"] and c["is_real"]:
+                    x1, _, _, y2 = [int(v) for v in bbox]
+                    cv2.putText(
+                        annotated, c["dominant"].capitalize(),
+                        (x1, y2 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2,
+                    )
 
             cv2.putText(
                 annotated, f"FPS: {fps:.1f}", (10, 30),
@@ -427,7 +506,13 @@ elif mode == "Live Recognition":
         key="live-recognition",
         video_processor_factory=FaceRecognitionProcessor,
         media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
+        async_processing=False,
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+            ]
+        },
     )
 
     st.caption(

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import cv2
 import numpy as np
 from deepface import DeepFace
+
+logger = logging.getLogger(__name__)
 
 
 class LivenessChecker:
@@ -34,11 +37,15 @@ class LivenessChecker:
                 anti_spoofing=True,
                 enforce_detection=False,
             )
+            logger.debug("DeepFace anti-spoof raw results: %s", results)
             if results:
                 face = results[0]
-                is_real = face.get("is_real", True)
+                logger.debug("Face keys: %s", list(face.keys()))
+                is_real = face.get("is_real", False)
                 confidence = face.get("antispoof_score", 1.0 if is_real else 0.0)
                 return (bool(is_real), float(confidence))
-            return (True, 1.0)
-        except Exception:
-            return (True, 1.0)
+            logger.warning("DeepFace returned empty results for anti-spoofing")
+            return (False, 0.0)
+        except Exception as e:
+            logger.error("Liveness check failed: %s", e, exc_info=True)
+            return (True, 0.5)  # fail-open: unknown = pass through

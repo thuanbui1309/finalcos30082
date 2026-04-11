@@ -5,7 +5,12 @@ import torch
 from PIL import Image
 
 from src.models import ArcFaceClassifier, FaceClassifier, FaceEmbedNet
-from src.models.edgeface_backbone import EDGEFACE_VARIANTS, load_edgeface
+
+try:
+    from src.models.edgeface_backbone import EDGEFACE_VARIANTS, load_edgeface
+except ModuleNotFoundError:  # pragma: no cover
+    EDGEFACE_VARIANTS = []
+    load_edgeface = None  # type: ignore
 from src.utils.metrics import cosine_similarity, euclidean_distance
 from src.utils.transforms import get_edgeface_transform, get_inference_transform
 
@@ -34,6 +39,11 @@ class FaceVerifier:
         self.model_type = model_type
 
         if model_type in EDGEFACE_VARIANTS:
+            if load_edgeface is None:
+                raise ImportError(
+                    "EdgeFace backbone is not available in this installation. "
+                    "Install/restore src.models.edgeface_backbone to use EdgeFace variants."
+                )
             self.transform = get_edgeface_transform(img_size=112)
             self.model = load_edgeface(
                 name=model_type,
